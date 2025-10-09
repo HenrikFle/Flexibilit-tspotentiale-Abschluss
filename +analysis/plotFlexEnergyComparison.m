@@ -9,7 +9,7 @@ if nargin < 5 || isempty(scenarioLabels)
 end
 
 % Szenario-Bezeichner für Plot und Legende bereinigen ("Szenario"/"Scenario" entfernen)
-plotLabels = regexprep(scenarioLabels, '^(?i)\s*(szenario|scenario)\s*', '');
+plotLabels = regexprep(scenarioLabels, '^\s*(szenario|scenario)\s*', '', 'ignorecase');
 
 if isempty(flexTables)
     warning('plotFlexEnergyComparison:NoData', ...
@@ -45,9 +45,18 @@ end
 
 scenarioColors = [0 0.45 0.74; 0.85 0.33 0.10; 0.47 0.67 0.19; 0.49 0.18 0.56];
 scenarioColors = scenarioColors(1:numScenarios, :);
-drawOrder      = numScenarios:-1:1;  % zeichne größte Szenarien zuerst
 
-techCats = categorical(techNamesRef, techNamesRef, 'Ordinal', true);
+yBase = (1:numTech)';
+barWidth = 0.24;
+if numScenarios > 1
+    offsetSpan = 0.28;
+    offsets = linspace(-offsetSpan, offsetSpan, numScenarios);
+else
+    offsets = 0;
+end
+
+% Reihenfolge fix: oberste Position entspricht erstem Szenario-Eintrag
+offsets = offsets(:)';
 
 figure('Name','Flexibilitätspotenziale – Szenarienvergleich', ...
        'NumberTitle','off','Position',[680 80 1280 520]);
@@ -58,25 +67,36 @@ xline(ax,0,'k--','HandleVisibility','off');
 
 set(ax,'FontWeight','bold');
 set(ax,'YDir','reverse');
+set(ax,'YTick', yBase, 'YTickLabel', techNamesRef);
+
+yMargin = max(0.45, (barWidth + max(abs(offsets))) * 1.2);
+ylim(ax, [min(yBase) - yMargin, max(yBase) + yMargin]);
 
 hScenario = gobjects(numScenarios,1);
-for idx = 1:numScenarios
-    s = drawOrder(idx);
-    posVals = posMatrix(:, s);
-    negVals = negMatrix(:, s);
+for s = 1:numScenarios
+    faceColor = scenarioColors(s,:);
+    edgeColor = faceColor .* 0.75;
 
-    posColor = scenarioColors(s,:);
-    negColor = scenarioColors(s,:);
+    posVals = max(posMatrix(:, s), 0);
+    negVals = min(negMatrix(:, s), 0);
+    yPos = yBase + offsets(s);
 
-    barh(ax, techCats, negVals, 'BarWidth',0.6, ...
-        'FaceColor', negColor, 'EdgeColor', negColor .* 0.8, ...
-        'LineWidth', 1.1);
-    hPos = barh(ax, techCats, posVals, 'BarWidth',0.6, ...
-        'FaceColor', posColor, 'EdgeColor', posColor .* 0.8, ...
-        'LineWidth', 1.1);
+    if any(posVals)
+        hPos = barh(ax, yPos, posVals, 'BarWidth', barWidth, ...
+            'FaceColor', faceColor, 'EdgeColor', edgeColor, ...
+            'LineWidth', 1.1);
+        if ~isgraphics(hScenario(s))
+            hScenario(s) = hPos(1);
+        end
+    end
 
-    if isempty(hScenario(s)) || ~isgraphics(hScenario(s))
-        hScenario(s) = hPos;
+    if any(negVals)
+        hNeg = barh(ax, yPos, negVals, 'BarWidth', barWidth, ...
+            'FaceColor', faceColor, 'EdgeColor', edgeColor, ...
+            'LineWidth', 1.1);
+        if ~isgraphics(hScenario(s))
+            hScenario(s) = hNeg(1);
+        end
     end
 end
 
@@ -96,59 +116,41 @@ labelPad = max(0.5, 0.2 * span);
 
 xlim(ax, [xLimits(1) - (labelPad + textOffset), xLimits(2) + (labelPad + textOffset)]);
 
-yIdx = double(techCats);
-anchorIdx = find(contains(lower(plotLabels), '2050'), 1, 'last');
-if isempty(anchorIdx)
-    anchorIdx = numScenarios;
-end
-
-ySpacing = 0.16;
 for t = 1:numTech
-    baseY = yIdx(t);
+    baseY = yBase(t);
 
     % --- Positive Seite ---------------------------------------------------
-    posAnchorVal = posMatrix(t, anchorIdx);
-    if posAnchorVal <= 0
-        posAnchorVal = max(posMatrix(t,:));
-    end
-    if posAnchorVal > 0
-        xTextPos = posAnchorVal + textOffset;
-        yStartPos = baseY + (numScenarios-1)/2 * ySpacing;
-        for s = 1:numScenarios
-            posVal = posMatrix(t,s);
-            if posVal > 0
-                yPos = yStartPos - (s-1) * ySpacing;
-                text(ax, xTextPos, yPos, ...
-                    sprintf('%+.1f', posVal), ...
-                    'HorizontalAlignment','left', 'VerticalAlignment','middle', ...
-                    'FontWeight','bold', 'Color', scenarioColors(s,:));
-            end
+    posRow = posMatrix(t,:);
+    for s = 1:numScenarios
+        posVal = posRow(s);
+        if posVal > 0
+            xTextPos = posVal + textOffset;
+            text(ax, xTextPos, baseY + offsets(s), ...
+                sprintf('%+d', round(posVal)), ...
+                'HorizontalAlignment','left', 'VerticalAlignment','middle', ...
+                'FontWeight','bold', 'Color', scenarioColors(s,:));
         end
     end
 
     % --- Negative Seite ---------------------------------------------------
-    negAnchorVal = negMatrix(t, anchorIdx);
-    if negAnchorVal >= 0
-        negAnchorVal = min(negMatrix(t,:));
-    end
-    if negAnchorVal < 0
-        xTextNeg = negAnchorVal - textOffset;
-        yStartNeg = baseY - (numScenarios-1)/2 * ySpacing;
-        for s = 1:numScenarios
-            negVal = negMatrix(t,s);
-            if negVal < 0
-                yPos = yStartNeg + (s-1) * ySpacing;
-                text(ax, xTextNeg, yPos, ...
-                    sprintf('%+.1f', negVal), ...
-                    'HorizontalAlignment','right', 'VerticalAlignment','middle', ...
-                    'FontWeight','bold', 'Color', scenarioColors(s,:));
-            end
+    negRow = negMatrix(t,:);
+    for s = 1:numScenarios
+        negVal = negRow(s);
+        if negVal < 0
+            xTextNeg = negVal - textOffset;
+            text(ax, xTextNeg, baseY + offsets(s), ...
+                sprintf('%+d', round(negVal)), ...
+                'HorizontalAlignment','right', 'VerticalAlignment','middle', ...
+                'FontWeight','bold', 'Color', scenarioColors(s,:));
         end
     end
 end
 
-legend(ax, hScenario, plotLabels, 'Location','southoutside', ...
-       'NumColumns', numScenarios);
+legendMask = isgraphics(hScenario);
+if any(legendMask)
+    legend(ax, hScenario(legendMask), plotLabels(legendMask), ...
+           'Location','southoutside', 'NumColumns', numScenarios);
+end
 
 scenarioCaption = strjoin(scenarioNames, ', ');
 sgtitle(sprintf('Flexibilitätspotenziale (%s) – %s', scenarioCaption, zeitraumName), ...
@@ -159,7 +161,7 @@ fprintf('-------------------------------------\n');
 for t = 1:numTech
     fprintf('%s:\n', techNamesRef{t});
     for s = 1:numScenarios
-        fprintf('  %-15s  Netzaufnahme: %+6.1f kWh   Netzentlastung: %+6.1f kWh\n', ...
+        fprintf('  %-15s  Netzaufnahme: %+6.0f kWh   Netzentlastung: %+6.0f kWh\n', ...
                 plotLabels{s}, posMatrix(t,s), -negMatrix(t,s));
     end
 end

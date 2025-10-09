@@ -16,21 +16,39 @@ function [pEV_total, SoCvec, pEV_groups, SoC_groups] = aggregatedEVModel( ...
 
 % ---------- Konstanten & Hilfsgrößen -------------------------------------
 nSteps = length(resNoBatt_kW);
+
 pA=0.3; pB=0.25; pC=0.3; pD=0.15;
+
 capA = capacityEV_kWh*pA; maxA = pMaxEV_kW*pA;
 capB = capacityEV_kWh*pB; maxB = pMaxEV_kW*pB;
 capC = capacityEV_kWh*pC; maxC = pMaxEV_kW*pC;
 capD = capacityEV_kWh*pD; maxD = pMaxEV_kW*pD;
 
+emergencyFactor = 0.25;
+emergA = emergencyFactor * maxA;
+emergB = emergencyFactor * maxB;
+emergC = emergencyFactor * maxC;
+emergD = emergencyFactor * maxD;
+
+
 dailyCons = (2250/365)*numEV;          % Fahrverbrauch
+
 rateA = pA*dailyCons/(15-6);
+
 rateB = pB*dailyCons/(24-(17-8));
+
 rateC = pC*dailyCons/(18-9);
+
 rateD = pD*dailyCons/6;
 
+
+
 minSOC   = 0.40;    % Notfall-Ladegrenze
+
 basalSOC = 0.70;    % Basalladen-Ziel
+
 maxSOC   = 0.90;    % maximaler Lade-SoC
+
 v2gSOC   = 0.70;    % neue Entladeschwelle (≥ 70 %)
 
 % ---------- Speichergrößen ----------------------------------------------
@@ -73,22 +91,42 @@ for i = 1:nSteps
     SoC_C = max(SoC_C-driveC*rateC*dt/capC,0);
     SoC_D = max(SoC_D-driveD*rateD*dt/capD,0);
 
+    isSurplus = deltaP <= lower;
+
     % ---------- 1) Notfall-Laden ----------------------------------------
-    if availA&&SoC_A<minSOC
-        E=min((minSOC-SoC_A)*capA, maxA*dt);
-        pEV_A(i)=-E/dt;  SoC_A=SoC_A+E/capA; end
-    if availB&&SoC_B<minSOC
-        E=min((minSOC-SoC_B)*capB, maxB*dt);
-        pEV_B(i)=-E/dt;  SoC_B=SoC_B+E/capB; end
-    if availC&&SoC_C<minSOC
-        E=min((minSOC-SoC_C)*capC, maxC*dt);
-        pEV_C(i)=-E/dt;  SoC_C=SoC_C+E/capC; end
-    if availD&&SoC_D<minSOC
-        E=min((minSOC-SoC_D)*capD, maxD*dt);
-        pEV_D(i)=-E/dt;  SoC_D=SoC_D+E/capD; end
+    % Läuft nur außerhalb echter Überschussphasen, damit bei ΔP ≤ lower
+    % die dort verfügbare Leistung ohne Notfall-Drossel genutzt werden kann.
+    if ~isSurplus
+        if availA&&SoC_A<minSOC
+            E=min((minSOC-SoC_A)*capA, emergA*dt);
+            if E>0
+                pEV_A(i)=pEV_A(i)-E/dt;  SoC_A=SoC_A+E/capA;
+            end
+        end
+        if availB&&SoC_B<minSOC
+            E=min((minSOC-SoC_B)*capB, emergB*dt);
+            if E>0
+                pEV_B(i)=pEV_B(i)-E/dt;  SoC_B=SoC_B+E/capB;
+            end
+        end
+        if availC&&SoC_C<minSOC
+            E=min((minSOC-SoC_C)*capC, emergC*dt);
+            if E>0
+                pEV_C(i)=pEV_C(i)-E/dt;  SoC_C=SoC_C+E/capC;
+            end
+        end
+        if availD&&SoC_D<minSOC
+            E=min((minSOC-SoC_D)*capD, emergD*dt);
+            if E>0
+                pEV_D(i)=pEV_D(i)-E/dt;  SoC_D=SoC_D+E/capD;
+            end
+        end
+    end
+
 
     % ---------- 2) PV-Überschuss-Laden ----------------------------------
-    if deltaP<=lower
+
+    if isSurplus
         excess = max(lower - deltaP, 0);               % [kW]
         w=[pA*availA pB*availB pC*availC pD*availD];
         if sum(w)>0

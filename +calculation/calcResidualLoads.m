@@ -233,16 +233,25 @@ end
 
 %% 4a) Basalladen / Flex-Signal trennen -----------------------------------
 deltaP  = resNoStorage_kW;
+
 minSOC  = 0.40;
+
 withinBand = (deltaP >= flexLowerBound) & (deltaP <= flexUpperBound);
 isBasal = withinBand & pEV_kW<0;
-isEmerg = SoC_EV<minSOC & pEV_kW<0;
+isSurplus = deltaP <= flexLowerBound;
+isEmerg = (SoC_EV<minSOC) & (pEV_kW<0) & ~isSurplus;
 maskCharge   = isBasal | isEmerg;
 
+
+
 pEV_charge            = zeros(nSteps,1);
+
 pEV_charge(maskCharge)= -pEV_kW(maskCharge);
+
 pEV_flex              = pEV_kW;
+
 pEV_flex(maskCharge)  = 0;
+
 
 %% 5) Weitere Residuallasten ----------------------------------------------
 resWithEV_kW   = resNoStorage_kW - pEV_kW;
