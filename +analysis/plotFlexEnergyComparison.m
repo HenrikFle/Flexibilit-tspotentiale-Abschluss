@@ -131,7 +131,7 @@ for s = 1:numScenarios
     end
 end
 
-xlabel(ax,'Mittelwert pro Tag [kWh/Tag] (links: Netzentlastung, rechts: Netzbezug)', ...
+xlabel(ax,'Mittelwert pro Tag [kWh/Tag] (negativ: Netzentlastung, : Netzbezug)', ...
     'FontName','Times New Roman', 'FontSize',12, 'FontWeight','bold');
 
 % --- Achsenskalierung & Labels ------------------------------------------
@@ -139,21 +139,24 @@ xLimits = [min(negMatrix(:)), max(posMatrix(:))];
 if ~any(isfinite(xLimits)), xLimits = [-1, 1]; end
 span = max(abs(xLimits));
 if span <= 0, span = 1; end
-tickStep = 10000;
-tickMax  = max(tickStep, ceil(span / tickStep) * tickStep);
+
+targetTickCount = 6;
+tickStep  = localNiceTickStep(span, targetTickCount);
+tickMax   = max(tickStep, ceil(span / tickStep) * tickStep);
 tickValues = -tickMax:tickStep:tickMax;
 
 xticks(ax, tickValues);
 xticklabels(ax, arrayfun(@localFormatThousand, tickValues, 'UniformOutput', false));
 ax.XAxis.Exponent = 0;
 
-textOffset = 0.02 * tickMax;
+textOffset = max(0.02 * tickMax, 0.25 * tickStep);
 labelPad   = max(0.5, 0.15 * tickMax);
 xlim(ax, [-(tickMax + labelPad), tickMax + labelPad]);
 
 % --- Wertbeschriftungen --------------------------------------------------
 for t = 1:numTech
-    baseY = yBase(t);
+    baseY  = yBase(t);
+
     posRow = posMatrix(t,:);
     for s = 1:numScenarios
         posVal = posRow(s);
@@ -165,6 +168,7 @@ for t = 1:numTech
                 'FontWeight','bold','Color', scenarioColors(s,:));
         end
     end
+
     negRow = negMatrix(t,:);
     for s = 1:numScenarios
         negVal = negRow(s);
@@ -203,15 +207,36 @@ for t = 1:numTech
                 localFormatThousand(max(-negMatrix(t,s), 0)));
     end
 end
+end  % <<< Ende der Hauptfunktion
 
-    function txt = localFormatThousand(value)
-        if ~isfinite(value), txt = ''; return; end
-        signStr = '';
-        if value < 0, signStr = '-'; end
-        absValue = abs(round(value));
-        core = sprintf('%0.0f', absValue);
-        core = regexprep(core,'(?<=\d)(?=(\d{3})+(?!\d))',' ');
-        if isempty(core), core = '0'; end
-        txt = [signStr core];
+% ===================== Subfunktionen ====================================
+function step = localNiceTickStep(spanValue, targetCount)
+    if nargin < 2 || targetCount <= 0
+        targetCount = 5;
     end
+    if ~isfinite(spanValue) || spanValue <= 0
+        step = 1;
+        return;
+    end
+    rawStep   = spanValue / targetCount;
+    magnitude = 10 ^ floor(log10(rawStep));
+    baseSteps = magnitude .* [1, 2, 5, 10];
+    idx = find(rawStep <= baseSteps, 1, 'first');
+    if isempty(idx)
+        step = baseSteps(end);
+    else
+        step = baseSteps(idx);
+    end
+end
+
+function txt = localFormatThousand(value)
+    if ~isfinite(value), txt = ''; return; end
+    signStr = '';
+    if value < 0, signStr = '-'; end
+    absValue = abs(round(value));
+    core = sprintf('%0.0f', absValue);
+    % Tausendertrennzeichen als Leerzeichen (z. B. "37 533")
+    core = regexprep(core,'(?<=\d)(?=(\d{3})+(?!\d))',' ');
+    if isempty(core), core = '0'; end
+    txt = [signStr core];
 end
