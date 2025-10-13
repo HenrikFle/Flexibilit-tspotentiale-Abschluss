@@ -260,6 +260,8 @@ if ~isempty(negW) && E_pos>0 && E_neg>0
 end
 legend(axW,'Location','best');
 
+
+
 %% FIGUR 3 – SoC-Verlauf
 figure('Name','SoC-Verlauf','NumberTitle','off','Position',[700 450 800 300]);
 ax3 = axes('Parent',gcf); hold(ax3,'on'); grid(ax3,'on');
