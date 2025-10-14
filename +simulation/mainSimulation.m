@@ -140,6 +140,7 @@ function mainSimulation
             dt = 0.25;  % Zeitraster in Stunden (15-min)
 
             flexTables = cell(1, numel(scenarioList));
+            residualResultsAll = cell(1, numel(scenarioList));
             scenarioRan = false;
             sharedFlexBounds = struct();
 
@@ -220,6 +221,7 @@ function mainSimulation
 
                 if runAllScenarios
                     flexTables{sIdx} = residualResults.flexEnergyTable;
+                    residualResultsAll{sIdx} = residualResults;
                 else
                     %% --- Visualisierung (Einzelszenario) ---------------
                     analysis.plotQuartierResults( ...
@@ -234,6 +236,7 @@ function mainSimulation
             if runAllScenarios
                 validIdx = ~cellfun(@isempty, flexTables);
                 flexTables = flexTables(validIdx);
+                residualResultsAll = residualResultsAll(validIdx);
                 scenarioNamesSel  = scenarioNames(validIdx);
                 scenarioLabelsSel = scenarioLabels(scenarioList(validIdx));
                 if isempty(flexTables)
@@ -242,6 +245,10 @@ function mainSimulation
                 else
                     analysis.plotFlexEnergyComparison(flexTables, scenarioNamesSel, ...
                         zeitraumName, cw, scenarioLabelsSel);
+                    if ~isempty(residualResultsAll)
+                        analysis.plotFlexDailyProfilesComparison(residualResultsAll, ...
+                            scenarioNamesSel, zeitraumName, cw, scenarioLabelsSel);
+                    end
                     disp('Plot fertig (Szenarienvergleich).');
                 end
             else
