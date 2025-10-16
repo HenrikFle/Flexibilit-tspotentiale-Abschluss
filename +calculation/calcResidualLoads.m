@@ -3,18 +3,14 @@
 function residualResults = calcResidualLoads( ...
     normalDataSel, pvDataSel, dtHours, ...
     capacityBatt_kWh, pMaxBatt_kW, effRoundTrip, ...
-    useEV, capacityEV_kWh, pMaxEV_kW, numEV, ...
-    flexWindowDays, flexStdMultiplier, hpCount, flexBoundsOverride)
+    useEV, capacityEV_kWh, pMaxEV_kW, numEV, prevDayMean, ...
+    hpCount)
 % calcResidualLoads.m  – inklusive DHW-WP
 % ------------------------------------------------------------
 %   Erzeugt Residuallasten & Flex-Energieblöcke.
 %   HEIZPERIODEN-ERGÄNZUNG:
 %       Heizungs-WP zählt nur vom 1. Okt bis 30. Apr.
 % ------------------------------------------------------------
-
-if nargin < 14 || isempty(flexBoundsOverride)
-    flexBoundsOverride = struct();
-end
 
 %% 0) Basis-Daten ----------------------------------------------------------
 merged = outerjoin(normalDataSel, pvDataSel, ...
@@ -34,23 +30,30 @@ startDatePy = py.datetime.datetime( ...
 
 simStaticHeat = py.hisim_matlab_bridge.HiSimHeatPumpSim( ...
                     startDatePy, int64(dtHours*3600), int64(nSteps));
+simFlexHeat   = py.hisim_matlab_bridge.HiSimHeatPumpSim( ...
+                    startDatePy, int64(dtHours*3600), int64(nSteps));
 
 wpStatic_kW = zeros(nSteps,1);
+wpFlex_kW   = zeros(nSteps,1);
 
 % Preallocate arrays für Raumtemperaturen (statisch und dynamisch WP)
 T_room_stat = nan(nSteps,1);
+T_room_dyn  = nan(nSteps,1);
 
 %% 1a) DHW-Simulation ------------------------------------------------------
 simStaticDHW = py.hisim_matlab_bridge.HiSimDHWOnlySim( ...
                     startDatePy, int64(dtHours*3600), int64(nSteps));
+simFlexDHW   = py.hisim_matlab_bridge.HiSimDHWOnlySim( ...
+                    startDatePy, int64(dtHours*3600), int64(nSteps));
 
 dhwStatic_kW = zeros(nSteps,1);
+dhwFlex_kW   = zeros(nSteps,1);
 
-%% 1b) Haupt-Zeitschleife (statisch) --------------------------------------
+%% 1b) Haupt-Zeitschleife --------------------------------------------------
 for i = 1:nSteps
     ts_now = merged.Timestamp(i);
 
-    % ---------- Heizungs-WP (statisch) -----------------------------------
+    % ---------- Heizungs-WP ---------------------------------------------
     m = month(ts_now); d = day(ts_now);
     inHeatingSeason = ...
          (m > 10) || (m < 4)  || (m == 10) || (m == 4 && d <= 30);
@@ -58,6 +61,7 @@ for i = 1:nSteps
     % summer cooling: keep room temperature below 24 °C
     Tcool = 24;
 
+    % --- statisch
     if inHeatingSeason
         outS = simStaticHeat.step(int64(20), int64(Tcool));
     else
@@ -66,129 +70,20 @@ for i = 1:nSteps
     wpStatic_kW(i) = double(outS{1});
     T_room_stat(i)  = double(outS{2});
 
-    % ---------- DHW-WP (statisch) ----------------------------------------
-    outDS = simStaticDHW.step_dhw(int64(50));
-    dhwStatic_kW(i) = double(outDS{1});
-end
-
-%% 1c) Aggregation auf Quartier-Ebene (statisch) --------------------------
-wpAgg_kW  = models.aggregatedWPModel(wpStatic_kW, hpCount, dtHours);
-
-% Skalierung der Warmwasser-Wärmepumpen analog zu den Heizungs-WPs. Die
-% Anzahl der DHW‑WPs entspricht dabei hpCount und ihre Einzelprofile
-% werden ebenfalls mit normalverteilten Zeitversätzen verschoben.
-dhwAgg_kW = models.aggregatedWPModel(dhwStatic_kW, hpCount, dtHours);
-
-%% 2) Residuallast ohne Speicher ------------------------------------------
-resNoStorage_kW = (baseLoad_kW + wpAgg_kW + dhwAgg_kW) - pv_kW;
-
-%% 2a) Statische Flex-Grenzen auf Wochenmittelbasis -----------------------
-useOverride = isstruct(flexBoundsOverride) && ...
-              isfield(flexBoundsOverride, 'lower') && ...
-              isfield(flexBoundsOverride, 'upper');
-
-if useOverride
-    flexLowerBound = flexBoundsOverride.lower(:);
-    flexUpperBound = flexBoundsOverride.upper(:);
-
-    if numel(flexLowerBound) ~= nSteps || numel(flexUpperBound) ~= nSteps
-        error('calcResidualLoads:BoundsLengthMismatch', ...
-              'Override-Grenzen müssen Länge %d haben.', nSteps);
-    end
-
-    if isfield(flexBoundsOverride, 'baseline')
-        baseline = flexBoundsOverride.baseline(:);
-        if numel(baseline) ~= nSteps
-            error('calcResidualLoads:BaselineLengthMismatch', ...
-                  'Override-Baseline muss Länge %d haben.', nSteps);
-        end
-    else
-        baseline = (flexUpperBound + flexLowerBound) / 2;
-    end
-
-    if isfield(flexBoundsOverride, 'spread')
-        spread = abs(flexBoundsOverride.spread(:));
-        if numel(spread) ~= nSteps
-            error('calcResidualLoads:SpreadLengthMismatch', ...
-                  'Override-Spread muss Länge %d haben.', nSteps);
-        end
-    else
-        spread = abs(flexUpperBound - baseline);
-    end
-else
-    weeklyMean = mean(resNoStorage_kW, 'omitnan');
-    if isnan(weeklyMean)
-        weeklyMean = 0;
-    end
-
-    flexStdMultiplier = max(flexStdMultiplier, 0);
-    if flexStdMultiplier == 0
-        flexStdMultiplier = 0.20;  % Default: ±20 % falls nicht gesetzt
-    end
-
-    baseline = weeklyMean * ones(nSteps, 1);
-    spread   = abs(weeklyMean) * flexStdMultiplier * ones(nSteps, 1);
-
-    flexLowerBound = baseline - spread;
-    flexUpperBound = baseline + spread;
-end
-
-maskLower = isnan(flexLowerBound);
-maskUpper = isnan(flexUpperBound);
-flexLowerBound(maskLower) = resNoStorage_kW(maskLower);
-flexUpperBound(maskUpper) = resNoStorage_kW(maskUpper);
-
-%% 2b) WP-Simulation (flexibel) -------------------------------------------
-simFlexHeat = py.hisim_matlab_bridge.HiSimHeatPumpSim( ...
-                    startDatePy, int64(dtHours*3600), int64(nSteps));
-simFlexDHW  = py.hisim_matlab_bridge.HiSimDHWOnlySim( ...
-                    startDatePy, int64(dtHours*3600), int64(nSteps));
-
-wpFlex_kW  = zeros(nSteps,1);
-dhwFlex_kW = zeros(nSteps,1);
-T_room_dyn = nan(nSteps,1);
-
-for i = 1:nSteps
-    ts_now = merged.Timestamp(i);
-
-    m = month(ts_now); d = day(ts_now);
-    inHeatingSeason = ...
-         (m > 10) || (m < 4)  || (m == 10) || (m == 4 && d <= 30);
-    Tcool = 24;
-
+    % --- flexibel
     residual_now = baseLoad_kW(i) + wpStatic_kW(i) - pv_kW(i);
-    lower = flexLowerBound(i);
-    upper = flexUpperBound(i);
-    baseVal = baseline(i);
-
-    if isnan(lower)
-        lower = baseVal;
-    end
-    if isnan(upper)
-        upper = baseVal;
-    end
-    if isnan(lower)
-        lower = resNoStorage_kW(i);
-    end
-    if isnan(upper)
-        upper = resNoStorage_kW(i);
-    end
 
     if inHeatingSeason
-        if residual_now < lower
-            Tset = 22;          % „Vorziehen“
-        elseif residual_now > upper
-            Tset = 19;          % „Zurückhalten“
+        if residual_now < 0
+            Tset = 22;         % slight heating increase
         else
             Tset = 20;
         end
         outF = simFlexHeat.step(int64(Tset), int64(25));
     else
-        Tset = 15;              % no heating in summer
-        if residual_now < lower
+        Tset = 15;             % no heating in summer
+        if residual_now < 0
             outF = simFlexHeat.step(int64(Tset), int64(Tcool), int64(21));
-        elseif residual_now > upper
-            outF = simFlexHeat.step(int64(Tset), int64(Tcool), int64(24));
         else
             outF = simFlexHeat.step(int64(Tset), int64(Tcool), int64(23));
         end
@@ -196,10 +91,11 @@ for i = 1:nSteps
     wpFlex_kW(i) = double(outF{1});
     T_room_dyn(i)   = double(outF{2});
 
-    if residual_now < lower
+    % ---------- DHW-WP -----------------------------------------------------
+    outDS = simStaticDHW.step_dhw(int64(50));
+    dhwStatic_kW(i) = double(outDS{1});
+    if residual_now < 0
         TsetDHW = 70;
-    elseif residual_now > upper
-        TsetDHW = 45;
     else
         TsetDHW = 50;
     end
@@ -207,21 +103,28 @@ for i = 1:nSteps
     dhwFlex_kW(i) = double(outDF{1});
 end
 
-%% 2c) Aggregation auf Quartier-Ebene (flexibel) --------------------------
+%% 1c) Aggregation auf Quartier-Ebene -------------------------------------
+wpAgg_kW      = models.aggregatedWPModel(wpStatic_kW, hpCount, dtHours);
 wpFlexAgg_kW  = models.aggregatedWPModel(wpFlex_kW,   hpCount, dtHours);
-dhwFlexAgg_kW = models.aggregatedWPModel(dhwFlex_kW, hpCount, dtHours);
+
+% Skalierung der Warmwasser-Wärmepumpen analog zu den Heizungs-WPs. Die
+% Anzahl der DHW‑WPs entspricht dabei hpCount und ihre Einzelprofile
+% werden ebenfalls mit normalverteilten Zeitversätzen verschoben.
+dhwAgg_kW     = models.aggregatedWPModel(dhwStatic_kW, hpCount, dtHours);
+dhwFlexAgg_kW = models.aggregatedWPModel(dhwFlex_kW,   hpCount, dtHours);
+
+%% 2) Residuallast ohne Speicher ------------------------------------------
+resNoStorage_kW = (baseLoad_kW + wpAgg_kW + dhwAgg_kW) - pv_kW;
 
 %% 3) Batterie -------------------------------------------------------------
 [pBatt_kW, SoC_Batt] = models.batteryModel( ...
-    resNoStorage_kW, dtHours, capacityBatt_kWh, pMaxBatt_kW, effRoundTrip, ...
-    flexLowerBound, flexUpperBound);
+    resNoStorage_kW, dtHours, capacityBatt_kWh, pMaxBatt_kW, effRoundTrip);
 resWithBatt_kW = resNoStorage_kW - pBatt_kW;
 
 %% 4) EV-Modell -----------------------------------------------------------
 if useEV
     [pEV_kW, SoC_EV, ~, SoC_groups] = models.aggregatedEVModel( ...
-        resNoStorage_kW, dtHours, numEV, pMaxEV_kW, capacityEV_kWh, ...
-        flexLowerBound, flexUpperBound);
+        resNoStorage_kW, dtHours, numEV, pMaxEV_kW, capacityEV_kWh, prevDayMean);
 else
     pEV_kW       = zeros(nSteps,1);
     SoC_EV       = zeros(nSteps,1);
@@ -233,25 +136,15 @@ end
 
 %% 4a) Basalladen / Flex-Signal trennen -----------------------------------
 deltaP  = resNoStorage_kW;
-
 minSOC  = 0.40;
-
-withinBand = (deltaP >= flexLowerBound) & (deltaP <= flexUpperBound);
-isBasal = withinBand & pEV_kW<0;
-isSurplus = deltaP <= flexLowerBound;
-isEmerg = (SoC_EV<minSOC) & (pEV_kW<0) & ~isSurplus;
+isBasal = deltaP>=0 & deltaP<prevDayMean & pEV_kW<0;
+isEmerg = SoC_EV<minSOC & pEV_kW<0;
 maskCharge   = isBasal | isEmerg;
 
-
-
 pEV_charge            = zeros(nSteps,1);
-
 pEV_charge(maskCharge)= -pEV_kW(maskCharge);
-
 pEV_flex              = pEV_kW;
-
 pEV_flex(maskCharge)  = 0;
-
 
 %% 5) Weitere Residuallasten ----------------------------------------------
 resWithEV_kW   = resNoStorage_kW - pEV_kW;
@@ -259,16 +152,17 @@ resWithBoth_kW = resNoStorage_kW - pBatt_kW - pEV_kW;
 
 %% 6) Flex-Energieblöcke (Ø kWh / Tag) ------------------------------------
 dBatt = resNoStorage_kW - resWithBatt_kW;
-dWP_total  = (wpFlexAgg_kW   - wpAgg_kW) + (dhwFlexAgg_kW  - dhwAgg_kW);
+dWP   = wpFlexAgg_kW   - wpAgg_kW;
+dDHW  = dhwFlexAgg_kW  - dhwAgg_kW;
 dEV   = pEV_flex;
 
 dt_kWh = dtHours;
 Epos = @(x) sum(max(0,x))*dt_kWh/7;
 Eneg = @(x) sum(min(0,x))*dt_kWh/7;
 
-flexTable.names    = {'Batterie','WP','EV'};
-flexTable.Epos_kWh = [Epos(dBatt); Epos(dWP_total); Epos(dEV)];
-flexTable.Eneg_kWh = [Eneg(dBatt); Eneg(dWP_total); Eneg(dEV)];
+flexTable.names    = {'Batterie','WP-Heizung','WP-DHW','EV'};
+flexTable.Epos_kWh = [Epos(dBatt); Epos(dWP); Epos(dDHW); Epos(dEV)];
+flexTable.Eneg_kWh = [Eneg(dBatt); Eneg(dWP); Eneg(dDHW); Eneg(dEV)];
 
 %% 7) Ergebnisse zurück ---------------------------------------------------
 residualResults.Timestamp           = merged.Timestamp;
@@ -293,10 +187,6 @@ residualResults.SoC_EV              = SoC_EV;
 residualResults.SoC_groups          = SoC_groups;
 
 residualResults.flexEnergyTable     = flexTable;
-residualResults.flexBaseline_kW     = baseline;
-residualResults.flexSpread_kW       = spread;
-residualResults.flexLowerBound_kW   = flexLowerBound;
-residualResults.flexUpperBound_kW   = flexUpperBound;
 
 % Zusatzfelder für Energieblock-Plot
 residualResults.pBatt_kW            = pBatt_kW;

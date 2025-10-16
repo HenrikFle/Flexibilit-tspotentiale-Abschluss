@@ -61,22 +61,10 @@ function mainSimulation
                               'Aktuelles Szenario', ...
                               'Szenario 2030', ...
                               'Szenario 2050', ...
-                              'Alle Szenarien', ...
                               'Exit');
-        if scenarioChoice == 0 || scenarioChoice == 5
+        if scenarioChoice == 0 || scenarioChoice == 4
             break;   % Abbruch über X/Exit
         end
-
-        scenarioLabelsAll = {'Aktuelles Szenario','Szenario 2030','Szenario 2050'};
-        scenarioNamesAll  = {'Aktuell','2030','2050'};
-        if scenarioChoice == 4
-            scenarioList = 1:3;
-        else
-            scenarioList = scenarioChoice;
-        end
-        scenarioLabels = scenarioLabelsAll;
-        scenarioNames  = scenarioNamesAll;
-        runAllScenarios = numel(scenarioList) > 1;
 
         %% 5.3) Quartier via Menü wählen ---------------------------------
         quartierChoice = menu('Wähle Quartier:', ...
@@ -88,8 +76,20 @@ function mainSimulation
             break;
         end
 
-        %% 5.5) Quartiersbezogene Datenaufbereitung (grundsätzlich) -------
-        quartierLoadBase = [];
+        %% 5.3) Parameter aus Konfiguration ------------------------------
+        params = config.getScenarioParams(scenarioChoice, quartierChoice);
+        roundTripEff     = params.roundTripEff;
+        useEV            = params.useEV;
+        numEV            = params.numEV;
+        capacityEV_kWh   = params.capacityEV_kWh;
+        pMaxEV_kW        = params.pMaxEV_kW;
+        capacityBatt_kWh = params.capacityBatt_kWh;
+        pMaxBatt_kW      = params.pMaxBatt_kW;
+        hpCount          = params.hpCount;
+        pvScaleMWp       = params.pvScaleMWp;
+        buildingWeights  = params.buildingWeights;
+
+        %% 5.5) Quartiersbezogene Datenaufbereitung ----------------------
         switch quartierChoice
             case {1,2,3}   % Aktuell alle Quartiere wie Quartier 1
                 % ---- Gebäude-Lasten zu einer Tabelle mergen -------------
@@ -111,15 +111,20 @@ function mainSimulation
                     end
                 end
 
-                quartierLoadBase = merged3;   % Speichern für spätere Gewichtung
+                % Gebäude-Gewichtungen (Wärmebedarf pro Gebäudeart)
+                sumW = merged3.Power*buildingWeights.EFH + ...
+                       merged3.Power_dataMFH_k*buildingWeights.MFH_k + ...
+                       merged3.Power_dataMFH_m*buildingWeights.MFH_m + ...
+                       merged3.Power_dataMFH_g*buildingWeights.MFH_g;
+                normalData = table(merged3.Timestamp, sumW*1e-3, ...
+                                     'VariableNames', {'Timestamp','Power'});
+
+                pvData  = pvDataRaw;   % PV-Profil unverändert übernehmen
+                hpCount = 920;         % Anzahl Wärmepumpen im Quartier
+                hpCount = params.hpCount;  % Anzahl Wärmepumpen
 
             otherwise
                 break;   % sollte nicht auftreten
-        end
-
-        if isempty(quartierLoadBase)
-            warning('Keine Quartiersdaten verfügbar – zurück zum Hauptmenü.');
-            continue;
         end
 
         %% 5.5) Zeitraum-Menü -------------------------------------------
@@ -139,121 +144,64 @@ function mainSimulation
 
             dt = 0.25;  % Zeitraster in Stunden (15-min)
 
-            flexTables = cell(1, numel(scenarioList));
-            residualResultsAll = cell(1, numel(scenarioList));
-            scenarioRan = false;
-            sharedFlexBounds = struct();
+            %% --- Datenauswahl nach Monat + Kalenderwoche ---------------
+            ND = normalData(ismember(month(normalData.Timestamp), months), :);
+            if ~isempty(ND), ND.KW = week(ND.Timestamp); end
+            normalDataSel = ND(ND.KW == cw, :);
 
-            needReferenceBounds = ~ismember(1, scenarioList);
+            PD = pvData(ismember(month(pvData.Timestamp), months), :);
+            if ~isempty(PD), PD.KW = week(PD.Timestamp); end
+            pvDataSelRaw = PD(PD.KW == cw, :);
+            if ~isempty(pvDataSelRaw)
+                pvDataSel       = pvDataSelRaw;
+                pvDataSel.Power = pvDataSel.Power * pvScaleMWp
+            else
+                pvDataSel = pvDataSelRaw;  % leer, gleiche Struktur
+            end
 
-            if needReferenceBounds
-                [refOk, refInputs] = prepareScenarioInputs(1);
-                if refOk
-                    paramsRef = refInputs.params;
-                    try
-                        refResults = calculation.calcResidualLoads( ...
-                            refInputs.normalDataSel, refInputs.pvDataSel, dt, ...
-                            paramsRef.capacityBatt_kWh, paramsRef.pMaxBatt_kW, paramsRef.roundTripEff, ...
-                            paramsRef.useEV, paramsRef.capacityEV_kWh, paramsRef.pMaxEV_kW, ...
-                            paramsRef.numEV, paramsRef.flexWindowDays, paramsRef.flexStdMultiplier, ...
-                            paramsRef.hpCount, struct());
+            %% --- Plausibilitätscheck ----------------------------------
+            if isempty(normalDataSel) && isempty(pvDataSel)
+                fprintf('Keine Daten für %s / KW %d vorhanden.\n', ...
+                        zeitraumName, cw);
+                continue;  % zurück zum Zeitraum-Menü
+            end
 
-                        sharedFlexBounds.lower    = refResults.flexLowerBound_kW;
-                        sharedFlexBounds.upper    = refResults.flexUpperBound_kW;
-                        sharedFlexBounds.baseline = refResults.flexBaseline_kW;
-                        sharedFlexBounds.spread   = refResults.flexSpread_kW;
-                    catch err
-                        warning('Referenzgrenzen konnten nicht berechnet werden: %s', err.message);
-                        sharedFlexBounds = struct();
+            %% --- Grenzwert für Basalladen (Mittelwert Vortag) ----------
+                     if ~isempty(normalDataSel)
+                nPerDay = round(24/dt);
+                nSteps  = height(normalDataSel);
+                prevDayMean = zeros(nSteps,1);
+                for d = 1:ceil(nSteps/nPerDay)
+                    idx_curr = (d-1)*nPerDay + (1:nPerDay);
+                    idx_curr = idx_curr(idx_curr <= nSteps);
+                    if d == 1
+                        idx_prev = idx_curr;
+                    else
+                        idx_prev = (d-2)*nPerDay + (1:nPerDay);
                     end
-                else
-                    warning('Referenzgrenzen (Aktuelles Szenario) nicht verfügbar – es werden Szenarioeigene Grenzen genutzt.');
-                end
-            end
-
-            for sIdx = 1:numel(scenarioList)
-                sc = scenarioList(sIdx);
-                [dataOk, scenarioInputs] = prepareScenarioInputs(sc);
-                if ~dataOk
-                    continue;
-                end
-
-                params = scenarioInputs.params;
-                normalDataSel = scenarioInputs.normalDataSel;
-                pvDataSel     = scenarioInputs.pvDataSel;
-
-                roundTripEff     = params.roundTripEff;
-                useEV            = params.useEV;
-                numEV            = params.numEV;
-                capacityEV_kWh   = params.capacityEV_kWh;
-                pMaxEV_kW        = params.pMaxEV_kW;
-                capacityBatt_kWh = params.capacityBatt_kWh;
-                pMaxBatt_kW      = params.pMaxBatt_kW;
-                hpCount          = params.hpCount;
-
-                %% --- Kernberechnung -----------------------------------
-                if runAllScenarios && isfield(sharedFlexBounds, 'lower') && ...
-                        ~isempty(sharedFlexBounds.lower)
-                    overrideBounds = sharedFlexBounds;
-                elseif ~runAllScenarios && needReferenceBounds && ...
-                        isfield(sharedFlexBounds,'lower') && ~isempty(sharedFlexBounds.lower)
-                    overrideBounds = sharedFlexBounds;
-                else
-                    overrideBounds = struct();
-                end
-
-                residualResults = calculation.calcResidualLoads( ...
-                    normalDataSel, pvDataSel, dt, ...
-                    capacityBatt_kWh, pMaxBatt_kW, roundTripEff, ...
-                    useEV, capacityEV_kWh, pMaxEV_kW, ...
-                    numEV, params.flexWindowDays, params.flexStdMultiplier, ...
-                    hpCount, overrideBounds);
-
-                scenarioRan = true;
-
-                if (runAllScenarios || (~runAllScenarios && sc == 1)) && ...
-                        ~(isfield(sharedFlexBounds,'lower') && ~isempty(sharedFlexBounds.lower))
-                    sharedFlexBounds.lower    = residualResults.flexLowerBound_kW;
-                    sharedFlexBounds.upper    = residualResults.flexUpperBound_kW;
-                    sharedFlexBounds.baseline = residualResults.flexBaseline_kW;
-                    sharedFlexBounds.spread   = residualResults.flexSpread_kW;
-                end
-
-                if runAllScenarios
-                    flexTables{sIdx} = residualResults.flexEnergyTable;
-                    residualResultsAll{sIdx} = residualResults;
-                else
-                    %% --- Visualisierung (Einzelszenario) ---------------
-                    analysis.plotQuartierResults( ...
-                        normalDataSel, pvDataSel, residualResults, zeitraumName, cw);
-                end
-            end
-
-            if ~scenarioRan
-                continue;  % kein Szenario erfolgreich -> zurück zur Auswahl
-            end
-
-            if runAllScenarios
-                validIdx = ~cellfun(@isempty, flexTables);
-                flexTables = flexTables(validIdx);
-                residualResultsAll = residualResultsAll(validIdx);
-                scenarioNamesSel  = scenarioNames(validIdx);
-                scenarioLabelsSel = scenarioLabels(scenarioList(validIdx));
-                if isempty(flexTables)
-                    fprintf('Keine gültigen Ergebnisse für %s / KW %d verfügbar.\n', ...
-                            zeitraumName, cw);
-                else
-                    analysis.plotFlexEnergyComparison(flexTables, scenarioNamesSel, ...
-                        zeitraumName, cw, scenarioLabelsSel);
-                    if ~isempty(residualResultsAll)
-                        analysis.plotFlexDailyProfilesComparison(residualResultsAll, ...
-                            scenarioNamesSel, zeitraumName, cw, scenarioLabelsSel);
+                    meanVal = mean(normalDataSel.Power(idx_prev), 'omitnan');
+                    if isnan(meanVal) || meanVal == 0
+                        meanVal = 2500;  % Fallback-Wert [kW]
                     end
-                    disp('Plot fertig (Szenarienvergleich).');
+                    prevDayMean(idx_curr) = meanVal;
                 end
             else
-                disp('Plot fertig.');
+                nSteps = height(pvDataSel);
+                prevDayMean = 2500 * ones(nSteps,1);
             end
+
+
+            %% --- Kernberechnung ---------------------------------------
+            residualResults = calculation.calcResidualLoads( ...
+                normalDataSel, pvDataSel, dt, ...
+                capacityBatt_kWh, pMaxBatt_kW, roundTripEff, ...
+                useEV, capacityEV_kWh, pMaxEV_kW, ...
+                numEV, prevDayMean, hpCount);
+
+            %% --- Visualisierung ---------------------------------------
+            analysis.plotQuartierResults( ...
+                normalDataSel, pvDataSel, residualResults, zeitraumName, cw);
+            disp('Plot fertig.');
 
             %% --- Folgeaktion ------------------------------------------
             nxt = menu('Weiter?', 'Zeitraum wechseln', 'Menü', 'Beenden');
@@ -267,47 +215,4 @@ function mainSimulation
 
     disp('Programm beendet.');
     close all;
-
-    function [ok, scenarioInputs] = prepareScenarioInputs(sc)
-        scenarioInputs = struct();
-
-        paramsLocal = config.getScenarioParams(sc, quartierChoice);
-        scenarioInputs.params = paramsLocal;
-
-        buildingWeightsLocal = paramsLocal.buildingWeights;
-        sumW = quartierLoadBase.Power               * buildingWeightsLocal.EFH + ...
-               quartierLoadBase.Power_dataMFH_k     * buildingWeightsLocal.MFH_k + ...
-               quartierLoadBase.Power_dataMFH_m     * buildingWeightsLocal.MFH_m + ...
-               quartierLoadBase.Power_dataMFH_g     * buildingWeightsLocal.MFH_g;
-
-        normalDataLocal = table(quartierLoadBase.Timestamp, sumW*1e-3, ...
-                                'VariableNames', {'Timestamp','Power'});
-
-        pvDataLocal = pvDataRaw;
-
-        ND = normalDataLocal(ismember(month(normalDataLocal.Timestamp), months), :);
-        if ~isempty(ND), ND.KW = week(ND.Timestamp); end
-        normalDataSelLocal = ND(ND.KW == cw, :);
-
-        PD = pvDataLocal(ismember(month(pvDataLocal.Timestamp), months), :);
-        if ~isempty(PD), PD.KW = week(PD.Timestamp); end
-        pvDataSelRawLocal = PD(PD.KW == cw, :);
-        if ~isempty(pvDataSelRawLocal)
-            pvDataSelLocal       = pvDataSelRawLocal;
-            pvDataSelLocal.Power = pvDataSelLocal.Power * paramsLocal.pvScaleMWp;
-        else
-            pvDataSelLocal = pvDataSelRawLocal;  % leer, gleiche Struktur
-        end
-
-        scenarioInputs.normalDataSel = normalDataSelLocal;
-        scenarioInputs.pvDataSel     = pvDataSelLocal;
-
-        if isempty(normalDataSelLocal) && isempty(pvDataSelLocal)
-            fprintf('Keine Daten für %s / KW %d im %s.\n', ...
-                    zeitraumName, cw, scenarioLabelsAll{sc});
-            ok = false;
-        else
-            ok = true;
-        end
-    end
 end  % function mainSimulation

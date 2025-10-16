@@ -43,28 +43,11 @@ Y0 = residualResults.Residual_NoStorage;
 Y1 = residualResults.Residual_WithBatt;
 Y2 = Y0 + (residualResults.wpFlexAgg_kW - residualResults.wpAgg_kW);
 Y3 = Y0 - residualResults.pEV_flex;
-hasFlexBounds = isfield(residualResults,'flexLowerBound_kW') && ...
-                isfield(residualResults,'flexUpperBound_kW');
-if hasFlexBounds
-    flexLower = residualResults.flexLowerBound_kW(:);
-    flexUpper = residualResults.flexUpperBound_kW(:);
-else
-    flexLower = [];
-    flexUpper = [];
-end
 
 hBase     = plot(ax2,X,Y0, 'k-','LineWidth',2,'DisplayName','Residuallast');
 hBattLine = plot(ax2,X,Y1, 'm-','LineWidth',2,'DisplayName','Mit Batterie','Visible','off');
 hBattFill = fill(ax2, [X;flipud(X)], [Y0;flipud(Y1)], [0 0 0.6], ...
     'FaceAlpha',0.2,'EdgeColor','none','DisplayName','Batterie','Visible','off');
-hFlexLower = matlab.graphics.chart.primitive.Line.empty;
-hFlexUpper = matlab.graphics.chart.primitive.Line.empty;
-if hasFlexBounds
-    hFlexLower = plot(ax2,X,flexLower,'Color',[0.85 0.33 0.10], ...
-        'LineStyle',':','LineWidth',1.5,'DisplayName','Flex-Untergrenze');
-    hFlexUpper = plot(ax2,X,flexUpper,'Color',[0.93 0.69 0.13], ...
-        'LineStyle',':','LineWidth',1.5,'DisplayName','Flex-Obergrenze');
-end
 hWP       = plot(ax2,X,Y2, 'g--','LineWidth',2,'DisplayName','Mit flexibler WP','Visible','off');
 hEV       = plot(ax2,X,Y3, 'c-.','LineWidth',2,'DisplayName','Mit flexiblem EV','Visible','off');
 
@@ -222,20 +205,19 @@ if ~isempty(negE) && EdisE>0 && EchgE>0
 end
 legend(axE,'Location','best');
 
-%% --- Wärmepumpen (Heizung + DHW) – Tagesprofil (Var-2) ---
-figure('Name',[zeitraumName,' – Tagesprofil Wärmepumpe gesamt'], ...
-       'NumberTitle','off','Units','normalized','Position',[0.1 0.25 0.8 0.35]);
+%% --- Wärmepumpe – Tagesprofil (Var-2) ---
+figure('Name',[zeitraumName,' – Tagesprofil Wärmepumpe'], ...
+       'NumberTitle','off','Units','normalized','Position',[0.1 0.4 0.8 0.3]);
 axW = gca; hold(axW,'on'); grid(axW,'on');
 plot(axW,X(idDay),Y0(idDay),'k-','LineWidth',1.4,'DisplayName','Residuallast');
 yline(axW,0,'k--','HandleVisibility','off');
 xlabel(axW,'Zeit','FontWeight','bold'); ylabel(axW,'Leistung [kW]','FontWeight','bold');
-title(axW,[zeitraumName,' (',datestr(t0,'dd-mmm'),') – Wärmepumpe gesamt'],'FontWeight','bold');
+title(axW,[zeitraumName,' (',datestr(t0,'dd-mmm'),') – Wärmepumpe'],'FontWeight','bold');
 datetick(axW,'x','HH:MM','keepticks','keeplimits');
 
-% Differenz flexibel – statisch (Heizung + DHW)
-dWP_total = (residualResults.wpFlexAgg_kW + residualResults.dhwFlexAgg_kW) - ...
-            (residualResults.wpAgg_kW + residualResults.dhwAgg_kW);
-wpDay = dWP_total(idDay);
+% Differenz flexibel – statisch
+dWP   = residualResults.wpFlexAgg_kW - residualResults.wpAgg_kW;
+wpDay = dWP(idDay);
 
 % Energiebilanz (kWh) – positive / negative Teile
 E_pos =  sum(max(0,wpDay)) * dt_h;   % Mehrverbrauch (Netzaufnahme)
@@ -260,7 +242,42 @@ if ~isempty(negW) && E_pos>0 && E_neg>0
 end
 legend(axW,'Location','best');
 
+%% --- WP-DHW – Tagesprofil (Var-2) ---
+figure('Name',[zeitraumName,' – Tagesprofil WP-DHW'], ...
+       'NumberTitle','off','Units','normalized','Position',[0.1 0.05 0.8 0.3]);
+axWD = gca; hold(axWD,'on'); grid(axWD,'on');
+plot(axWD,X(idDay),Y0(idDay),'k-','LineWidth',1.4,'DisplayName','Residuallast');
+yline(axWD,0,'k--','HandleVisibility','off');
+xlabel(axWD,'Zeit','FontWeight','bold'); ylabel(axWD,'Leistung [kW]','FontWeight','bold');
+title(axWD,[zeitraumName,' (',datestr(t0,'dd-mmm'),') – WP-DHW'],'FontWeight','bold');
+datetick(axWD,'x','HH:MM','keepticks','keeplimits');
 
+% Differenz flexibel – statisch
+dDHW   = residualResults.dhwFlexAgg_kW - residualResults.dhwAgg_kW;
+dhwDay = dDHW(idDay);
+
+% Energiebilanz (kWh) – positive / negative Teile
+E_pos =  sum(max(0,dhwDay)) * dt_h;   % Mehrverbrauch (Netzaufnahme)
+E_neg = -sum(min(0,dhwDay)) * dt_h;   % Einsparung  (Netzentlastung)
+
+negW = find(Y0(idDay)<0);
+if ~isempty(negW) && E_pos>0 && E_neg>0
+    tmp = X(idDay);
+    tPos0 = tmp(negW(1));                 % während PV-Überschuss -> Netzaufnahme
+    tPos1 = tmp(negW(end)) + minutes(dt_h*60);
+    P_pos =  E_pos / hours(tPos1 - tPos0);
+    patch(axWD,[tPos0 tPos1 tPos1 tPos0],[0 0 P_pos P_pos], ...
+          colChg,'FaceAlpha',alpha,'EdgeColor','none', ...
+          'DisplayName',sprintf('Mehrverbrauch (+%.1f kWh)',E_pos));
+
+    tNeg0 = tPos1;                        % anschließend bis 24 Uhr -> Netzentlastung
+    tNeg1 = t0 + days(1);
+    P_neg = -E_neg / hours(tNeg1 - tNeg0);
+    patch(axWD,[tNeg0 tNeg1 tNeg1 tNeg0],[0 0 P_neg P_neg], ...
+          colDis,'FaceAlpha',alpha,'EdgeColor','none', ...
+          'DisplayName',sprintf('Einsparung (−%.1f kWh)',E_neg));
+end
+legend(axWD,'Location','best');
 
 %% FIGUR 3 – SoC-Verlauf
 figure('Name','SoC-Verlauf','NumberTitle','off','Position',[700 450 800 300]);
@@ -369,23 +386,28 @@ fprintf('---------------------------------\n\n');
 
 
 
-   %% --- Durchschnittliche tägliche Energie der Wärmepumpe gesamt in der aktuellen Woche ---
-% X und residualResults.* sind bereits definiert
+    %% --- Durchschnittliche tägliche Energie der Heizungs-WP in der aktuellen Woche ---
+% X und residualResults.wpAgg_kW sind bereits definiert
 % residualResults.dtHours enthält den Zeitschritt in Stunden (z.B. 0.25)
 
 % 1) Indizes für die aktuelle Kalenderwoche ermitteln
 idxWeek = week(X) == currentWeek;
 
-% 2) Gesamtenergie der statischen WP (Heizung + DHW) in dieser Woche (kWh)
-wpTotal = residualResults.wpAgg_kW + residualResults.dhwAgg_kW;
-E_WP_week = sum(wpTotal(idxWeek)) * residualResults.dtHours;
+% 2) Gesamtenergie der statischen WP in dieser Woche (kWh)
+E_WP_week = sum(residualResults.wpAgg_kW(idxWeek)) * residualResults.dtHours;
 
 % 3) Durchschnittliche Energie pro Tag (kWh/Tag)
 avgDaily_WP = E_WP_week / 7;
 
 % 4) Ausgabe in der Konsole
-fprintf('Ø tägliche Energie Wärmepumpe gesamt KW %d: %.2f kWh/Tag\n', ...
+fprintf('Ø tägliche Energie Heizungs-WP KW %d: %.2f kWh/Tag\n', ...
         currentWeek, avgDaily_WP);
+
+% --- Durchschnittliche tägliche Energie der WP-DHW in der aktuellen Woche ---
+E_DHW_week = sum(residualResults.dhwAgg_kW(idxWeek)) * residualResults.dtHours;
+avgDaily_DHW = E_DHW_week / 7;
+fprintf('Ø tägliche Energie WP-DHW KW %d: %.2f kWh/Tag\n', ...
+        currentWeek, avgDaily_DHW);
 
 
 
